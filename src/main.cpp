@@ -100,7 +100,7 @@ int main(int argc, char** argv){
         expect(z,'='); long long val = parseExpr(z,env); expect(z,';');
         env[name]=val; continue;
       }
-      if(kw=="send"){
+      if(kw=="yield"){
         expect(z,'('); long long val = parseExpr(z,env); expect(z,')'); expect(z,';');
         retv = val; break;
       }

@@ -9,4 +9,4 @@ let c = (a - b) * 2;   // (10 - 3) * 2 = 14
 let d = c / b;         // 14 / 3 = 4 (integer division)
 
 // 3) return the final result
-send(a + b + c + d);    // 10 + 3 + 14 + 4 = 31
+yield(a + b + c + d);    // 10 + 3 + 14 + 4 = 31

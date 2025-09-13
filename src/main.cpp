@@ -3,7 +3,6 @@ using namespace std;
 
 #if __has_include(<sysexits.h>)
   #include <sysexits.h>
-  // Map to sysexits when available
   constexpr int EC_OK        = EXIT_SUCCESS;
   constexpr int EC_USAGE     = EX_USAGE;       // bad CLI usage
   constexpr int EC_IO        = EX_NOINPUT;     // input file problems
@@ -12,10 +11,10 @@ using namespace std;
 #else
   enum : int {
     EC_OK        = 0,
-    EC_USAGE     = 2, // bad CLI usage
-    EC_IO        = 3, // input file/read error
-    EC_COMPILE   = 1, // compile (syntax/semantic) error
-    EC_TOOLCHAIN = 4  // assembler/linker failures
+    EC_USAGE     = 2,
+    EC_IO        = 3,
+    EC_COMPILE   = 1,
+    EC_TOOLCHAIN = 4
   };
 #endif
 
@@ -33,41 +32,90 @@ struct Src {
   }
 };
 
-bool idStart(char c){ return isalpha((unsigned char)c)||c=='_'; }
-bool idChar (char c){ return isalnum((unsigned char)c)||c=='_'; }
-string ident(Src& z){ if(!idStart(z.p())) throw runtime_error("expected identifier");
-  string r; r.push_back(z.g()); while(idChar(z.p())) r.push_back(z.g()); return r; }
-long long number(Src& z){ if(!isdigit((unsigned char)z.p())) throw runtime_error("expected integer");
-  long long v=0; while(isdigit((unsigned char)z.p())) v=v*10+(z.g()-'0'); return v; }
-void expect(Src& z, char c){ z.skip(); if(z.p()!=c) throw runtime_error(string("expected '")+c+"'"); z.g(); }
+static inline bool idStart(char c){ return isalpha((unsigned char)c)||c=='_'; }
+static inline bool idChar (char c){ return isalnum((unsigned char)c)||c=='_'; }
 
-long long parseExpr(Src& z, unordered_map<string,long long>& env);
+static string ident(Src& z){
+  z.skip(); if(!idStart(z.p())) throw runtime_error("expected identifier");
+  string r; r.push_back(z.g()); while(idChar(z.p())) r.push_back(z.g()); return r;
+}
+static long long number(Src& z){
+  z.skip(); if(!isdigit((unsigned char)z.p())) throw runtime_error("expected integer");
+  long long v=0; while(isdigit((unsigned char)z.p())) v=v*10+(z.g()-'0'); return v;
+}
+static void expect(Src& z, char c){
+  z.skip(); if(z.p()!=c) throw runtime_error(string("expected '")+c+"'");
+  z.g();
+}
 
-long long factor(Src& z, unordered_map<string,long long>& env){
+struct Emitter {
+  ostream& out;
+  unordered_set<string> vars; // names declared via 'let'
+  explicit Emitter(ostream& o): out(o) {}
+  string slot(const string& n) const { return "var_"+n; }
+  void noteVar(const string& n){ vars.insert(n); }
+};
+
+static void genExpr(Src& z, Emitter& em, const unordered_set<string>& declared);
+static void genTerm(Src& z, Emitter& em, const unordered_set<string>& declared);
+static void genFactor(Src& z, Emitter& em, const unordered_set<string>& declared);
+
+static void genFactor(Src& z, Emitter& em, const unordered_set<string>& declared){
   z.skip();
-  if(isdigit((unsigned char)z.p())) return number(z);
-  if(idStart(z.p())){ string n=ident(z); if(!env.count(n)) throw runtime_error("undeclared: "+n); return env[n]; }
-  if(z.p()=='('){ z.g(); auto v=parseExpr(z,env); expect(z,')'); return v; }
+  if(isdigit((unsigned char)z.p())){
+    long long v = number(z);
+    em.out << "    mov rax, " << v << "\n";
+    return;
+  }
+  if(idStart(z.p())){
+    string n = ident(z);
+    if(!declared.count(n)) throw runtime_error("undeclared: "+n);
+    em.out << "    mov rax, [" << em.slot(n) << "]\n";
+    return;
+  }
+  if(z.p()=='('){
+    z.g();
+    genExpr(z, em, declared);
+    expect(z,')');
+    return;
+  }
   throw runtime_error("expected factor");
 }
-long long term(Src& z, unordered_map<string,long long>& env){
-  long long v=factor(z,env);
+
+static void genTerm(Src& z, Emitter& em, const unordered_set<string>& declared){
+  genFactor(z, em, declared);
   while(true){
     z.skip(); char c=z.p();
-    if(c=='*'||c=='/'){ z.g(); long long r=factor(z,env);
-      if(c=='*') v*=r; else{ if(r==0) throw runtime_error("division by zero"); v/=r; } }
-    else break;
+    if(c=='*' || c=='/'){
+      z.g();
+      em.out << "    push rax\n";
+      genFactor(z, em, declared);
+      em.out << "    mov rbx, rax\n";
+      em.out << "    pop rax\n";
+      if(c=='*'){
+        em.out << "    imul rax, rbx\n";
+      }else{
+        em.out << "    cqo\n";
+        em.out << "    idiv rbx\n";
+      }
+    } else break;
   }
-  return v;
 }
-long long parseExpr(Src& z, unordered_map<string,long long>& env){
-  long long v=term(z,env);
+
+static void genExpr(Src& z, Emitter& em, const unordered_set<string>& declared){
+  genTerm(z, em, declared);
   while(true){
     z.skip(); char c=z.p();
-    if(c=='+'||c=='-'){ z.g(); long long r=term(z,env); v = (c=='+')? v+r : v-r; }
-    else break;
+    if(c=='+' || c=='-'){
+      z.g();
+      em.out << "    push rax\n";
+      genTerm(z, em, declared);
+      em.out << "    mov rbx, rax\n";
+      em.out << "    pop  rax\n";
+      if(c=='+') em.out << "    add rax, rbx\n";
+      else       em.out << "    sub rax, rbx\n";
+    } else break;
   }
-  return v;
 }
 
 int main(int argc, char** argv){
@@ -86,8 +134,11 @@ int main(int argc, char** argv){
 
   string src((istreambuf_iterator<char>(in)), {});
   Src z(src);
-  unordered_map<string,long long> env;
-  optional<long long> retv;
+
+  stringstream body;
+  Emitter em(body);
+  unordered_set<string> declared;
+  bool saw_yield = false;
 
   try{
     while(true){
@@ -97,34 +148,48 @@ int main(int argc, char** argv){
 
       if(kw=="let"){
         z.skip(); string name = ident(z);
-        expect(z,'='); long long val = parseExpr(z,env); expect(z,';');
-        env[name]=val; continue;
+        expect(z,'=');
+        genExpr(z, em, declared);
+        expect(z,';');
+        em.noteVar(name);
+        declared.insert(name);
+        body << "    mov [" << em.slot(name) << "], rax\n";
+        continue;
       }
+
       if(kw=="yield"){
-        expect(z,'('); long long val = parseExpr(z,env); expect(z,')'); expect(z,';');
-        retv = val; break;
+        expect(z,'(');
+        genExpr(z, em, declared);
+        expect(z,')'); expect(z,';');
+        // exit( (RAX) & 255 )
+        body << "    and rax, 255\n";
+        body << "    mov rdi, rax\n";
+        body << "    mov rax, 60\n";
+        body << "    syscall\n";
+        saw_yield = true;
+        continue;
       }
+
       throw runtime_error("unexpected identifier: "+kw);
     }
-    if(!retv.has_value()) retv = 0;
-
-    long long exit_code = ((*retv % 256) + 256) % 256;
 
     ofstream asmfile("out.asm");
-    asmfile <<
-R"(global _start
-section .text
-_start:
-    mov rax, 60
-    mov rdi, )" << exit_code << R"(
-    syscall
-)";
+    if(!asmfile){ cerr<<"cannot create out.asm\n"; return EC_IO; }
+
+    asmfile << "global _start\n";
+    if(!em.vars.empty()){
+      asmfile << "section .bss\n";
+      for(const auto& v: em.vars) asmfile << em.slot(v) << ": resq 1\n";
+    }
+    asmfile << "section .text\n_start:\n";
+    asmfile << body.str();
+    if(!saw_yield){
+      asmfile << "    mov rdi, 0\n    mov rax, 60\n    syscall\n";
+    }
     asmfile.close();
 
     int a = system("nasm -felf64 out.asm -o out.o");
-    if(a!=0){
-      throw runtime_error("toolchain: nasm failed");
-    }
+    if(a!=0) throw runtime_error("toolchain: nasm failed");
 
     int l = system("x86_64-linux-gnu-gcc -nostdlib -static -Wl,-e,_start -o out out.o");
     if(l!=0){
